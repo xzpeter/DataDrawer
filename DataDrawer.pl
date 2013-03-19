@@ -1,15 +1,48 @@
 #!/usr/bin/perl
- 
+
+=head1
+
+This is a data drawer using Gnuplot.
+mailme: xzpeter@gmail.com
+
+=cut 
+
 use warnings;
 use strict;
 use Term::Menus;
 use Data::Dumper;
 use Term::ANSIColor;
 use Chart::Gnuplot;
+use Carp::Assert;
+use Storable qw/dclone/;
 
 $|++;
 
-our (@csv_data, @split_data, $header, @vars, @results, %vars_range);
+# split_data should like:
+# $VAR1 = [
+#           [
+#             '128',
+#             '16384',
+#             'randread',
+#             '0.96',
+#             '0.00',
+#             '142405.42',
+#             '72928',
+#             '2.56',
+#             '0.00',
+#             '0',
+#             '0',
+#             '1048576',
+#             '0',
+#             '0',
+#             '21.31',
+#             '0',
+#             '898',
+#             '14378'
+#           ],
+#...
+# ]
+our (@csv_data, @split_data, $header, @vars, @results, %vars_range, $vars_n);
 # these are user selected vars/res to draw graph
 our ($x1, $x2, $y1) = (0, 1, 13);
 # the default fix point of vars
@@ -64,6 +97,7 @@ sub parse_header () {
 	my $cnt = 0;
 	$indexes{$_} = $cnt++ for (@vars);
 	$indexes{$_} = $cnt++ for (@results);
+	$vars_n = scalar @vars;
 }
 
 # parse the file
@@ -223,8 +257,108 @@ sub handle_draw_x_y () {
 		@requires = (@requires, $vars[$_], $vars_def[$_]);
 	}
 	my @data = filter_data(@requires);
-	my @points = sort {$a->[0] <=> $b->[0]} map {[$_->[$x1], $_->[$#vars+1+$y1]]} @data;
+	my @points = sort {$a->[0] <=> $b->[0]} map {[$_->[$x1], $_->[$vars_n+$y1]]} @data;
 	draw_x_y(\@points);
+}
+
+sub assert_type ($$) {
+	assert ((ref $_[0]) eq $_[1]);
+}
+
+=head3 draw_2x_y
+
+This is a wrapper to draw 2x-y data sets. Params are:
+
+  $title: the title of the graph
+  $x_name: the name of x-axia of the graph
+  $y_name: the name of y-axis
+  $data_sets: should be something like this:
+	{
+	  "x2=a1" => [[x1,y1], [x2,y2], ...],
+	  "x2=a2" => [[x1,y1], [x2,y2], ...],
+	  ...
+	  "x2=am" => [[x1,y1], [x2,y2], ...],
+	}
+
+=cut
+
+sub draw_2x_y ($$$$) {
+	my ($title, $x_name, $y_name, $data_sets) = @_;
+	assert_type ($data_sets, "HASH");
+
+	# Create chart object and specify the properties of the chart
+	my $chart = Chart::Gnuplot->new(
+		title  => $title,
+		xlabel => $x_name,
+		ylabel => $y_name,
+		xtics => {
+			mirror => "on",
+		},
+		ytics => {
+			mirror => "on",
+		},
+		x2tics => "on",
+		y2tics => "on",
+		grid => "on",
+		output => $output,
+		imagesize => "2, 2",
+		# legend => {
+		# 	position => "top right",
+		# 	width    => 20,
+		# 	height   => 15,
+		# 	align    => "right",
+		# 	order    => "horizontal reverse",
+		# 	title    => "Title of the legend",
+		# 	sample   => {
+		# 		length   => 50,
+		# 		position => "left",
+		# 		spacing  => 5,
+		# 	},
+		# 	border   => {
+		# 		linetype => 1,
+		# 		width    => 2,
+		# 		color    => "black",
+		# 	},
+		# },
+	);
+
+	# Create dataset object and specify the properties of the dataset
+	my @dsets = ();
+	foreach my $case (keys %$data_sets) {
+		my $dset = Chart::Gnuplot::DataSet->new(
+			points => $data_sets->{$case},
+			# title => "IOPS",
+			style => "linespoints",
+			width => 2,
+			# color => "red",
+		);
+		push @dsets, $dset;
+	}
+	# Plot the data set on the chart
+	$chart->plot2d(@dsets);
+	`eog $output`;
+
+}
+
+sub handle_draw_2x_y () {
+	my @requires = ();
+	for (0..$#vars) {
+		next if $x1 == $_ or $x2 == $_;
+		@requires = (@requires, $vars[$_], $vars_def[$_]);
+	}
+	my @data = filter_data(@requires);
+	my %data_sets;
+	foreach my $line (@data) {
+		my ($x1v, $x2v, $rv) = ($line->[$x1], $line->[$x2], $line->[$vars_n+$y1]);
+		my $key = $vars[$x2]."=$x2v";
+		$data_sets{$key} = [] if not defined $data_sets{$key};
+		push @{$data_sets{$key}}, [$x1v, $rv];
+	}
+	foreach my $cond (keys %data_sets) {
+		my @sorted = sort {$a->[0] <=> $b->[0]} @{$data_sets{$cond}};
+		$data_sets{$cond} = dclone (\@sorted);
+	}
+	draw_2x_y($results[$y1] . " Results", $vars[$x1], $results[$y1], \%data_sets);
 }
 
 sub handle_draw_graph () {
@@ -235,16 +369,16 @@ sub handle_draw_graph () {
 	);
 	my @handles = (
 		\&handle_draw_x_y,
-		# \&handle_draw_2x_y,
+		\&handle_draw_2x_y,
 		# \&handle_draw_x_2y,
 		# \&not_implemented,
-		\&not_implemented,
+		# \&not_implemented,
 		\&not_implemented,
 	);
 	my $sel = pick (\@menu, "What type of graph do you want to plot?");
 	foreach (0..$#menu) {
 		my $str = substr $menu[$_], 0, 5;
-		if ($sel =~ /$str/) {
+		if ($sel =~ /^$str/) {
 			$handles[$_]->();
 			last;
 		}
@@ -271,7 +405,7 @@ sub handle_main_menu () {
 	my $opt = &pick (\@menu, $title);
 	foreach (0..$#menu) {
 		my $str = substr $menu[$_], 0, 18;
-		if ($opt =~ /$str/) {
+		if ($opt =~ /^$str/) {
 			$handlers[$_]->();
 			last;
 		}
